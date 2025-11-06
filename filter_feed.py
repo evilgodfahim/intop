@@ -19,7 +19,7 @@ import requests
 # ===== CONFIG =====
 FEEDS_FILE = "feeds.txt"
 REFERENCE_FILE = "titles.txt"
-REFERENCE_URL = "https://raw.githubusercontent.com/evilgodfahim/ref/main/titles.txt"
+REFERENCE_URL = "https://raw.githubusercontent.com/evilgodfahim/futp/main/titles.txt"
 REF_EMB_NPY = "ref_embeddings.npy"
 OUTPUT_FILE = "filtered.xml"
 
