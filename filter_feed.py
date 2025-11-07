@@ -39,7 +39,7 @@ DBSCAN_EPS = 0.25
 DBSCAN_MIN_SAMPLES = 1
 
 # ---- New single control parameter (0.0 lenient -> 1.0 strict) ----
-FILTER_STRENGTH = 0.62  # default moderate
+FILTER_STRENGTH = 0.66  # default moderate
 DEBUG_FILTER = False    # set True to print per-article debug info
 # -------------------------------------------------------------------
 
