@@ -24,20 +24,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Cache pip
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Cache SentenceTransformer model
-        uses: actions/cache@v3
-        with:
-          path: models/all-mpnet-base-v2
-          key: ${{ runner.os }}-st-model-mpnet-v2
-
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -79,4 +65,3 @@ jobs:
           else
             git commit -m "Automated feed update: filtered feed"
             git push origin HEAD:main
-          fi
