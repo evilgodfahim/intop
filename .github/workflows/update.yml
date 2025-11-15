@@ -2,7 +2,7 @@ name: Feed Update Every 60 Minutes
 
 on:
   schedule:
-    - cron: '25 * * * *'
+    - cron: '45 * * * *'
   workflow_dispatch:
 
 concurrency:
@@ -39,13 +39,13 @@ jobs:
         run: |
           if [ ! -d "models/all-mpnet-base-v2" ]; then
             python - <<'EOF'
-from huggingface_hub import snapshot_download
-snapshot_download(
-    repo_id="sentence-transformers/all-mpnet-base-v2",
-    local_dir="models/all-mpnet-base-v2",
-    local_dir_use_symlinks=False
-)
-EOF
+          from huggingface_hub import snapshot_download
+          snapshot_download(
+              repo_id="sentence-transformers/all-mpnet-base-v2",
+              local_dir="models/all-mpnet-base-v2",
+              local_dir_use_symlinks=False
+          )
+          EOF
           fi
 
       # ✅ critical: run in repo root
@@ -65,3 +65,4 @@ EOF
           else
             git commit -m "Automated feed update: filtered feed"
             git push origin HEAD:main
+          fi
