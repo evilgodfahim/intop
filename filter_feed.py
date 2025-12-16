@@ -79,6 +79,7 @@ def domain_from_url(url: str) -> str:
         pass
     return ""
 
+
 # ===== FETCH TITLES FROM GITHUB =====
 def fetch_reference_titles():
     try:
@@ -93,6 +94,7 @@ def fetch_reference_titles():
     except Exception as e:
         print(f"[fetch_reference_titles] ERROR: {e}")
 
+
 # ===== LOAD REFERENCE TITLES =====
 def load_reference_titles():
     if not os.path.exists(REFERENCE_FILE):
@@ -106,6 +108,7 @@ def load_reference_titles():
     except Exception as e:
         print(f"[load_reference_titles] ERROR: {e}")
         return []
+
 
 # ===== PATTERN SCORING =====
 def calculate_analytical_score(title: str) -> int:
@@ -124,6 +127,7 @@ def calculate_analytical_score(title: str) -> int:
         score += 2
 
     return score
+
 
 # ===== MAIN =====
 def main():
@@ -151,7 +155,6 @@ def main():
         titles_hash = _titles_hash(ref_titles)
         hash_file = REF_EMB_NPY + ".sha256"
 
-        # if numpy cache exists and hash file exists and matches, load cache
         if os.path.exists(REF_EMB_NPY) and os.path.exists(hash_file):
             try:
                 with open(hash_file, "r", encoding="utf-8") as hf:
@@ -170,7 +173,6 @@ def main():
             except Exception as e:
                 print(f"[ref_emb] failed reading hash file: {e}")
 
-        # If embeddings still None, compute and save + store hash
         if ref_embeddings is None:
             try:
                 print("[ref_emb] computing reference embeddings...")
@@ -190,7 +192,18 @@ def main():
 
     feed_articles = []
     for url in feed_urls:
-        feed = feedparser.parse(url)
+        try:
+            # ===== Minimal change: fetch feed via requests with User-Agent =====
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; MyBot/1.0)"}
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                print(f"[main] WARNING: failed to fetch {url}, status {resp.status_code}")
+                continue
+            feed = feedparser.parse(resp.content)
+        except Exception as e:
+            print(f"[main] ERROR fetching/parsing feed {url}: {e}")
+            continue
+
         for e in feed.entries:
             if getattr(e, "title", None) and getattr(e, "link", None):
                 feed_articles.append({
@@ -208,67 +221,43 @@ def main():
     article_emb = model.encode([a["title"] for a in feed_articles], convert_to_numpy=True)
 
     # ===== HYBRID FILTER (ENHANCED) =====
-    # Single-parameter control: FILTER_STRENGTH in [0.0, 1.0]
-    # This block computes richer semantic signals (top-k ref similarity, ref-coherence)
-    # and a shallowness penalty, then makes a single composite decision.
     candidates = []
 
-    TOP_K = 5  # number of top reference titles to inspect per article (kept small)
+    TOP_K = 5
     for idx, a in enumerate(feed_articles):
         t = a["title"]
         pat = calculate_analytical_score(t)
-
-        # Article embedding (numpy vector)
         art_emb = article_emb[idx]
 
-        # If we have reference embeddings, compute similarity signals
         max_sim = 0.0
         mean_topk = 0.0
-        ref_coherence = 0.0  # how similar the top-k refs are to each other
-        sims = None
+        ref_coherence = 0.0
         if ref_embeddings is not None and ref_embeddings.size > 0:
-            # sims: similarity between this article and every ref title
             sims = cosine_similarity([art_emb], ref_embeddings)[0]
-            # primary signals
             max_sim = float(np.max(sims))
-            # top-k mean similarity
-            # handle case when there are fewer refs than TOP_K
             k = min(TOP_K, sims.shape[0])
-            topk_idx = np.argsort(sims)[-k:][::-1]  # indices of top-k (desc)
+            topk_idx = np.argsort(sims)[-k:][::-1]
             topk_vals = sims[topk_idx] if topk_idx.size > 0 else np.array([max_sim])
             mean_topk = float(np.mean(topk_vals)) if topk_vals.size > 0 else max_sim
-
-            # ref coherence: average pairwise cosine among the selected top-k reference embeddings
             if len(topk_idx) > 1:
                 topk_embs = ref_embeddings[topk_idx]
-                # pairwise similarity matrix
                 pair_mat = cosine_similarity(topk_embs)
-                # take upper triangle (excluding diagonal) mean
                 n = pair_mat.shape[0]
                 if n > 1:
                     upper_ix = np.triu_indices(n, k=1)
-                    # protect against empty upper triangle
-                    if upper_ix[0].size > 0:
-                        ref_coherence = float(np.mean(pair_mat[upper_ix]))
-                    else:
-                        ref_coherence = 0.0
+                    ref_coherence = float(np.mean(pair_mat[upper_ix])) if upper_ix[0].size > 0 else 0.0
                 else:
                     ref_coherence = 0.0
             else:
                 ref_coherence = 0.0
 
-        # ----- pattern / shallowness heuristics -----
-        # Normalize pattern score to [0,1] (pattern score expected small int)
         norm_pat = max(0.0, min(1.0, pat / 6.0))
 
-        # Shallow/clickbait heuristics (penalty between 0..1)
         shallow_penalty = 0.0
         if t:
             tl = t.strip()
-            # All-caps very likely clickbaity / low quality
             if tl.isupper():
                 shallow_penalty += 0.45
-            # Exclamation mark or suspicious phrases
             if "!" in tl:
                 shallow_penalty += 0.25
             low_quality_phrases = ["you won't believe", "won't believe", "shocking", "what happened next",
@@ -276,48 +265,27 @@ def main():
             tl_lower = tl.lower()
             if any(p in tl_lower for p in low_quality_phrases):
                 shallow_penalty += 0.35
-            # Short listicles like "10 ways ..." are often shallow
             if re.search(r'^\d+\s+(ways|things|reasons)\b', tl_lower):
                 shallow_penalty += 0.20
         shallow_penalty = min(1.0, shallow_penalty)
 
-        # ----- Composite semantic signal -----
-        # We combine: max_sim (most important), mean_topk (robustness), ref_coherence (topic sanity),
-        # and normalized pattern score (small positive boost).
-        # Fixed internal weights produce a stable composite score in [0,1].
-        w_max = 0.60
-        w_mean = 0.20
-        w_coh = 0.10
-        w_pat = 0.10
+        w_max, w_mean, w_coh, w_pat = 0.60, 0.20, 0.10, 0.10
         composite = (w_max * max_sim) + (w_mean * mean_topk) + (w_coh * ref_coherence) + (w_pat * norm_pat)
+        composite = composite * (1.0 - 0.65 * shallow_penalty)
 
-        # Apply shallowness penalty: reduce composite
-        composite = composite * (1.0 - 0.65 * shallow_penalty)  # penalize up to ~65%
-
-        # ----- Adaptive acceptance threshold derived from FILTER_STRENGTH -----
-        # threshold ranges roughly from 0.35 (lenient) to 0.8 (strict)
         adaptive_threshold = 0.35 + FILTER_STRENGTH * 0.45
-
-        # Minimum semantic requirement: ensure not accepting total noise when Filter is strict
-        min_sim_required = 0.20 + FILTER_STRENGTH * 0.45  # range ~0.20..0.65
-
-        # Final accept logic:
-        # - Must have composite >= adaptive_threshold
-        # - And the raw max_sim must be at least min_sim_required OR the pattern score must be high enough
-        pat_thresh = 1 + int(FILTER_STRENGTH * 4)  # maps 0..1 to 1..5
+        min_sim_required = 0.20 + FILTER_STRENGTH * 0.45
+        pat_thresh = 1 + int(FILTER_STRENGTH * 4)
         accept = False
         if composite >= adaptive_threshold:
             if max_sim >= min_sim_required or pat >= pat_thresh:
                 accept = True
 
         if DEBUG_FILTER:
-            print(f"[DEBUG] title={t!r}\n"
-                  f"        max_sim={max_sim:.3f} mean_topk={mean_topk:.3f} ref_coh={ref_coherence:.3f}\n"
-                  f"        pat={pat} norm_pat={norm_pat:.3f} shallow_pen={shallow_penalty:.2f}\n"
-                  f"        composite={composite:.3f} adaptive_th={adaptive_threshold:.3f} "
-                  f"min_sim_req={min_sim_required:.3f} accept={accept}")
+            print(f"[DEBUG] title={t!r} max_sim={max_sim:.3f} mean_topk={mean_topk:.3f} "
+                  f"ref_coh={ref_coherence:.3f} pat={pat} shallow_pen={shallow_penalty:.2f} "
+                  f"composite={composite:.3f} adaptive_th={adaptive_threshold:.3f} accept={accept}")
 
-        # If accepted, prepare meta as before
         if accept:
             meta = a.copy()
             meta.update({
@@ -327,7 +295,6 @@ def main():
                 "timestamp": timestamp_from_pubdate(a.get("published",""))
             })
             candidates.append(meta)
-    # ===== END ENHANCED HYBRID FILTER =====
 
     if not candidates:
         print("[main] no candidates passed filter; exiting")
@@ -337,7 +304,6 @@ def main():
     cutoff_ts = int((datetime.now(timezone.utc) - timedelta(hours=CUTOFF_HOURS)).timestamp())
     candidates = [c for c in candidates if c["timestamp"] >= cutoff_ts]
     print(f"[main] {len(candidates)} candidates after {CUTOFF_HOURS}h cutoff")
-
     if not candidates:
         print("[main] no recent candidates; exiting")
         return
@@ -354,7 +320,6 @@ def main():
     for c in candidates:
         clusters.setdefault(c["cluster"], []).append(c)
 
-    # ===== CLUSTER SCORING =====
     def cluster_score(cluster):
         size = len(cluster)
         avg_pat = sum(x["pattern_score"] for x in cluster) / max(1, size)
@@ -369,14 +334,11 @@ def main():
     cluster_list.sort(key=lambda x: x["score"], reverse=True)
 
     # ===== DIVERSITY & FINAL SELECTION =====
-    # New logic: pick at most ONE representative per cluster to avoid near-duplicate articles.
-    # Helper to compute per-item score (same formula used previously)
     def compute_item_score(it):
         recency_hours = max(1, (datetime.now(timezone.utc).timestamp() - it["timestamp"]) / 3600.0)
         recency_score = 1.0 / (1.0 + recency_hours / 24.0)
         return it["pattern_score"] * 2.0 + it["sim_to_refs"] * 5.0 + recency_score
 
-    # Build a list of cluster representatives
     cluster_reps = []
     for cl in cluster_list:
         items = cl["items"]
@@ -390,15 +352,12 @@ def main():
         if best_item is not None:
             cluster_reps.append({"label": cl["label"], "rep": best_item, "cluster_score": cl["score"], "rep_item_score": best_score})
 
-    # Sort cluster representatives by cluster_score (priority), then rep_item_score
     cluster_reps.sort(key=lambda x: (x["cluster_score"], x["rep_item_score"]), reverse=True)
 
-    # Select up to MAX_OUTPUT_ITEMS representatives (one per cluster)
     final = []
     seen_titles = set()
     for crep in cluster_reps:
         art = crep["rep"]
-        # avoid exact duplicate titles if any
         if art["title"] in seen_titles:
             continue
         final.append(art)
@@ -406,7 +365,6 @@ def main():
         if len(final) >= MAX_OUTPUT_ITEMS:
             break
 
-    # If for some reason final is empty (shouldn't happen), fall back to first items from cluster_list
     if not final:
         for cl in cluster_list[:MAX_OUTPUT_ITEMS]:
             final.append(cl["items"][0])
@@ -416,7 +374,6 @@ def main():
     # ===== APPEND MODE: KEEP LAST 500 ITEMS =====
     print("[main] appending to existing filtered.xml (max 500 items)")
 
-    # Load existing items if file exists
     existing_items = []
     if os.path.exists(OUTPUT_FILE):
         try:
@@ -433,17 +390,14 @@ def main():
         except Exception as e:
             print(f"[main] warning: failed to parse existing xml: {e}")
 
-    # Merge new (final) + existing, deduplicate by normalized link or title
     seen = set()
     merged = []
 
     def _norm_key(title: str, link: str) -> str:
-        """Return normalized dedupe key: prefer link, otherwise normalized title."""
         if link:
             return link.strip()
         return re.sub(r"\s+", " ", (title or "").strip().lower())
 
-    # Add new items first (so newest are first)
     for art in final:
         key = _norm_key(art.get("title",""), art.get("link",""))
         if not key:
@@ -457,7 +411,6 @@ def main():
                 "source": art.get("feed_source", "")
             })
 
-    # Append older existing items if they are not duplicates
     for art in existing_items:
         key = _norm_key(art.get("title",""), art.get("link",""))
         if not key:
@@ -466,12 +419,10 @@ def main():
             seen.add(key)
             merged.append(art)
 
-    # Keep only newest 500 items
     MAX_ARCHIVE_ITEMS = 500
     merged = merged[:MAX_ARCHIVE_ITEMS]
     print(f"[main] merged total items after dedupe: {len(merged)} (capped at {MAX_ARCHIVE_ITEMS})")
 
-    # Write back clean RSS XML (new file replacing the old, but content is merged)
     root = ET.Element("rss", version="2.0")
     channel = ET.SubElement(root, "channel")
     ET.SubElement(channel, "title").text = "Filtered Feed"
@@ -488,6 +439,7 @@ def main():
     tree = ET.ElementTree(root)
     tree.write(OUTPUT_FILE, encoding="utf-8", xml_declaration=True)
     print(f"[main] appended {len(final)} new items; final {len(merged)} items written to {OUTPUT_FILE}")
+
 
 if __name__ == "__main__":
     main()
